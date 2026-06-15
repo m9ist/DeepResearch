@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Новое исследование{% endblock %}
+{% block crumb %}/ новое{% endblock %}
+{% block body %}
+<div class="panel">
+  <h1>Новое исследование</h1>
+  <p class="muted">Интервью идёт в окне терминала (pi/claude). Сессия сохраняется
+    в папке Run'а — можно закрыть и продолжить позже.</p>
+
+  <label class="fld">Агент</label>
+  <select id="agent">
+    <option value="pi">pi + qwen3.6 (локальный)</option>
+    <option value="claude">Claude Code</option>
+  </select>
+
+  <label class="fld">Изначальная идея</label>
+  <textarea id="idea" rows="5" placeholder="О чём исследование? Что хочется узнать?"></textarea>
+
+  <div style="margin-top:12px">
+    <button class="btn" onclick="ping()">Проверить агента</button>
+    <button class="btn" onclick="suggest()">Предложить имя</button>
+    <span id="status" class="note"></span>
+  </div>
+
+  <label class="fld">Короткое имя (slug)</label>
+  <input type="text" id="name" placeholder="например: gpt-researcher-pipeline">
+
+  <div style="margin-top:16px">
+    <button class="btn primary" onclick="create()">Создать и запустить интервью →</button>
+    <span id="cstatus" class="note"></span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const setNote = (el, msg, cls) => { el.className = "note " + (cls||""); el.textContent = msg; };
+async function post(url, body) {
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{})});
+  return r.json();
+}
+async function ping() {
+  setNote($("status"), "проверяю…");
+  const r = await post("/api/ping", {agent:$("agent").value});
+  setNote($("status"), r.ok ? ("агент на связи · " + (r.msg||"")) : ("агента нет: " + (r.msg||"")), r.ok ? "ok":"err");
+}
+async function suggest() {
+  if (!$("idea").value.trim()) return setNote($("status"), "сначала впиши идею", "err");
+  setNote($("status"), "придумываю имя…");
+  const r = await post("/api/suggest-name", {agent:$("agent").value, idea:$("idea").value});
+  if (r.name) { $("name").value = r.name; setNote($("status"), "имя предложено — можно поправить", "ok"); }
+  else setNote($("status"), "не вышло (" + (r.error||"?") + ") — впиши имя сам", "err");
+}
+async function create() {
+  if (!$("idea").value.trim()) return setNote($("cstatus"), "нужна идея", "err");
+  if (!$("name").value.trim()) return setNote($("cstatus"), "нужно имя (нажми «Предложить имя» или впиши)", "err");
+  setNote($("cstatus"), "создаю…");
+  const c = await post("/api/create", {agent:$("agent").value, idea:$("idea").value, name:$("name").value});
+  if (!c.run) return setNote($("cstatus"), "ошибка создания", "err");
+  setNote($("cstatus"), "запускаю терминал…", "ok");
+  await post("/run/" + encodeURIComponent(c.run) + "/launch", {});
+  location.href = "/run/" + encodeURIComponent(c.run);
+}
+</script>
+{% endblock %}

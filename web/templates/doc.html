@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ path }} — {{ name }}{% endblock %}
+{% block crumb %}/ <a href="/run/{{ name }}">{{ name }}</a> / {{ path }}{% endblock %}
+{% block body %}
+<div class="panel">
+  <a class="btn" href="/run/{{ name }}">← к Run'у</a>
+  <a class="btn" href="#" onclick="return openExt('{{ path }}')">Открыть в редакторе ↗</a>
+</div>
+<script>
+  function openExt(path){
+    fetch('/run/{{ name }}/open?path='+encodeURIComponent(path), {method:'POST'}).catch(()=>{});
+    return false;
+  }
+</script>
+<div class="panel md">
+  {{ html | safe }}
+</div>
+{% endblock %}

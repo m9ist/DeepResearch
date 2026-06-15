@@ -1,0 +1,15 @@
+# Минимальный конфиг SearXNG: мёржится с дефолтами образа.
+# Главное для нас — включён формат json (web_search дёргает &format=json).
+use_default_settings: true
+
+server:
+  # Локальная разработка; для не-локального доступа сменить.
+  secret_key: "dr-local-dev-secret-change-me"
+  bind_address: "0.0.0.0"
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json

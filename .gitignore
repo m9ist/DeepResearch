@@ -1,0 +1,21 @@
+# venv / python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# исследовательские данные (локальные, объёмные, могут содержать чужой контент)
+runs/
+
+# временные папки скриптов
+tools/tmp/
+
+# персист истории загрузки LLM (12ч, локальное)
+.llm_load.json
+
+# node / прочее
+node_modules/
+
+# ОС
+Thumbs.db
+.DS_Store
