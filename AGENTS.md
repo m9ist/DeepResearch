@@ -16,16 +16,19 @@
 
 | Файл/папка | Что |
 |---|---|
-| `spec.md` | ТЗ (выход интервью-Intake) |
-| `config.json` | `concurrency`, `worker_provider/worker_model`, `rounds_budget`, лимиты |
-| `state.json` | `status` (intake/running/paused/done), `round`, `rounds_budget` |
-| `backlog.jsonl` | задания: `{id, kind(search/fetch/topic), title, query?/url?, status(ready/in_progress/done), source}` |
-| `events.jsonl` | лог: `worker_start/end`, `round_start/end`, `harvest`, `checkpoint`, … |
+| `spec.md` | ТЗ — ТЕКУЩАЯ версия (его читают все); при изменении старая копируется в историю |
+| `spec_versions/spec.vN.md` | неизменяемая история ТЗ (`store.snapshot_spec`, идемпотентно); видны во вьюере |
+| `config.json` | `concurrency`, `worker_provider/worker_model`, `rounds_budget`, `round_timeout_min` (0=без таймаута), лимиты |
+| `state.json` | `status` (intake/running/paused/done), `round` (=число сводок), `rounds_budget`, `round_budget_sec`, `phase` (`synth` пока идёт сводка) |
+| `backlog.jsonl` | задания: `{id, kind(search/fetch/topic), title, query?/url?, status(ready/in_progress/done/dropped), round_added, source}` |
+| `events.jsonl` | лог: `worker_start/end`, `round_start/end`, `harvest`, `checkpoint`, `synth_retry`, `checkpoint_failed`, `task_dropped/kept`, `refine_*`, … |
 | `findings/NNNN.md` | находки (summary одного задания) |
 | `reports/round-NN.md`, `interim-NN.md`, `compiled-*.md` | сводки |
 | `sources/` | сырьё: транскрипты YT, отрендеренные страницы |
-| `console/<task_id>.log` | пост-мортем консоли воркера |
-| `prompts/`, `sessions/` | промпты воркеров; сессия pi-интервью |
+| `console/<task_id>.log` | пост-мортем консоли воркера (пишется и на провале — с причиной) |
+| `*.cmd` (intake/continue/refine) | лаунчеры терминальных диалогов pi/claude |
+| `refine_brief.md`, `refine_decisions.json` | доуточнение ТЗ: бриф диалога + решения агента по заданиям (`{drop,keep}`) |
+| `prompts/`, `sessions/`, `sessions-refine/` | промпты воркеров; сессия pi-интервью; сессия диалога уточнения |
 
 ## 3. State-машина (кратко)
 
@@ -39,6 +42,12 @@ in-flight, задания → `ready`. Истина на диске → можн
 прерванный паузой/рестартом до сводки, не засчитывается — переигрывается с тем же
 номером, бюджет не тратится. Восстановление после рестарта (`web/app._recover_orphans`)
 ставит `running→paused` и `state.round` = число написанных сводок.
+
+**Синтез сводки** на Checkpoint'е ретраится 3× (`checkpoint.synth_report`); при
+стойком отказе (напр. LLM лёг) фейк-сводка НЕ пишется — `run()` ловит исключение,
+логирует `checkpoint_failed` и встаёт на паузу (раунд не засчитан, на resume
+синтез повторится). Пока идёт синтез — `state.phase="synth"` (UI: баннер «идёт синтез»).
+Задания со статусом `dropped` в раунды не берутся (`run_round` фильтрует только `ready`).
 
 ## 4. Каталог операций (фраза → что делать)
 
@@ -83,6 +92,31 @@ PY -m orchestrator.cli run runs\<id>
 Веб: **+ Новое исследование** → диалог → терминал с pi-интервью → `spec.md` →
 «Запустить раунды».
 
+### «доуточнить ТЗ» / «поправить план по ходу»
+Группа **«Доуточнить ТЗ»** в панели Spec (видна при готовом `spec.md`): выбрать
+агента (pi/claude) → **✎ Доуточнить** (`/refine-launch`) генерит `refine_brief.md`
+(исходная идея + текущий ТЗ + незавершённые `ready`-задания) и открывает терминал
+в сессии `sessions-refine`. Агент обсуждает уточнения, ПЕРЕЗАПИСЫВАЕТ `spec.md`,
+пишет `refine_decisions.json` (`{drop,keep,add}`). Затем **🔄 подхватить решения**
+(`/refine-apply`) проставляет `drop`→`dropped`, `keep`→`ready` И добавляет НОВЫЕ
+задания из `add` (search/fetch под уточнённый фокус) — иначе уточнение не даёт новых вопросов.
+Раунды сам не запускает. Не нравится — повторный «✎ Доуточнить» (свежая сессия).
+
+### «не делать это задание» / «вернуть задание»
+В строке бэклога: **✕** (`/task/{id}/drop`, `ready→dropped`) и **↺**
+(`/task/{id}/keep`, `dropped→ready`). Трогает только `ready↔dropped` (done/in_progress — 400).
+`dropped` исключены из раундов.
+
+### «таймаут раунда» (5/10/30 мин / без)
+Селектор **«таймаут»** в контролах → `/set-timeout?m=` пишет `round_timeout_min`
+(0=без таймаута). Применяется со следующего раунда; таймер текущего — `⏱` в шапке.
+
+### «не тащит транскрипт YouTube» / «IP-бан»
+`youtube_transcript_api` банит IP за частые запросы. Лечение: троттл уже есть
+(`tools/youtube_one.py`, env `DR_YT_MIN_INTERVAL`, дефолт 1.5с между запросами);
+на IP-бане `web_fetch` отдаёт воркеру явную пометку и НЕ лезет в headless. Стойкий
+бан — подождать (временный) или резидентный прокси (см. `youtube_transcript_api`).
+
 ### «добавь задание вручную»
 ```
 PY -m orchestrator.cli add-task runs\<id> --kind fetch --title "..." --url "https://..."
@@ -95,9 +129,10 @@ PY -m orchestrator.cli add-task runs\<id> --kind fetch --title "..." --url "http
 ## 5. Где что в коде
 
 - `orchestrator/loop.py` — `run` (драйвер) + `run_round` (волна, concurrency).
-- `orchestrator/worker.py` — спавн `pi -p --mode json`, фазы/консоль, запись Finding.
+- `orchestrator/worker.py` — спавн `pi -p --mode json`, фазы/консоль (пишется и на провале), запись Finding.
 - `orchestrator/planner.py` — `slice_spec` (ТЗ → backlog).
-- `orchestrator/checkpoint.py` — харвест ссылок, `synth_report`, `interim_report`.
+- `orchestrator/intake.py` — `create_intake_run` (новое исследование), `build_refine` (доуточнение ТЗ), лаунчеры pi/claude.
+- `orchestrator/checkpoint.py` — харвест ссылок, `synth_report` (3 ретрая, иначе исключение→пауза), `interim_report`.
 - `orchestrator/store.py` — вся ФС-IO (атомарно); `progress.py` — фазы/консоль воркеров.
 - `web/app.py` — FastAPI: страницы, SSE (`events-stream`), контролы, рендер md;
   заглавная — баннер активного Run'а + `/api/home-status` (поллинг).
