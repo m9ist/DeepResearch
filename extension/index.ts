@@ -165,7 +165,15 @@ export default function (pi: any) {
         try {
           return textResult(await fetchYouTube(params.url, vid));
         } catch (e: any) {
-          ytNote = `[YT-транскрипт недоступен: ${(e?.message || String(e)).slice(0, 160)}; ниже — страница]\n\n`;
+          const msg = (e?.message || String(e)).toString();
+          // IP-бан (rate-limit) — headless страницы транскрипт всё равно не даст, только зря молотим.
+          if (/blocking requests from your IP|RequestBlocked|IpBlocked|too many requests/i.test(msg)) {
+            return textResult(
+              `[YouTube заблокировал запросы транскриптов с этого IP (rate-limit). Транскрипт сейчас ` +
+              `НЕДОСТУПЕН — повтори это задание позже (бан обычно временный, ~часы) либо нужен ` +
+              `резидентный прокси. НЕ ищи транскрипт в вебе и не пытайся достать его из страницы — его там нет.]`);
+          }
+          ytNote = `[YT-транскрипт недоступен: ${msg.slice(0, 160)}; ниже — страница]\n\n`;
         }
       }
       try {

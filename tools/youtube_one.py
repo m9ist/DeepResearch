@@ -22,16 +22,61 @@ stdout (машиночитаемо):
 import argparse
 import io
 import json
+import os
 import re
 import sys
+import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")  # иначе кириллица ошибки в логе воркера — кракозябры
 else:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
+# Глобальный (меж-процессный) троттл YT-запросов: YouTube банит IP за «слишком много
+# запросов». Воркеры — отдельные процессы, координируемся через файл-маркер времени.
+YT_MIN_INTERVAL = float(os.environ.get("DR_YT_MIN_INTERVAL", "1.5"))  # сек между транскрипт-запросами
+THROTTLE_FILE = Path(os.environ.get("DR_YT_THROTTLE_FILE",
+                     str(Path(tempfile.gettempdir()) / "dr_yt_throttle")))
+
+
+def throttle(min_interval: float, marker: Path) -> None:
+    """Не чаще одного запроса транскрипта раз в min_interval сек по всем воркерам.
+    Сериализуемся lock-файлом, выдерживаем интервал относительно метки прошлого запроса."""
+    if min_interval <= 0:
+        return
+    lock = marker.with_suffix(".lock")
+    acquired = False
+    for _ in range(600):  # ждём лок до ~60с, потом всё равно идём
+        try:
+            os.close(os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            acquired = True
+            break
+        except FileExistsError:
+            time.sleep(0.1)
+    try:
+        try:
+            last = float(marker.read_text())
+        except Exception:  # noqa: BLE001 — нет метки/битая → считаем «давно»
+            last = 0.0
+        wait = min_interval - (time.time() - last)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            marker.write_text(str(time.time()))
+        except Exception:  # noqa: BLE001 — метка не критична
+            pass
+    finally:
+        if acquired:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
 
 VIDEO_ID_RE = re.compile(
     r"(?:youtube\.com/watch\?[^#]*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/|youtube\.com/live/)([A-Za-z0-9_-]{11})"
@@ -80,6 +125,7 @@ def main():
     languages = [s.strip() for s in args.lang.split(",") if s.strip()]
     title = fetch_title(args.url)
 
+    throttle(YT_MIN_INTERVAL, THROTTLE_FILE)  # выдержать интервал по всем воркерам перед запросом
     try:
         transcript = fetch_transcript(video_id, languages)
     except Exception as e:
