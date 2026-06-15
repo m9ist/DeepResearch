@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 from .pi_runner import run_pi
 from .store import RunStore
@@ -88,16 +89,21 @@ def synth_report(store: RunStore, round_no: int) -> str:
     ctx = "\n\n".join(f"### {f['id']} ({f['fm'].get('kind', '')})\n{f['body'][:1500]}" for f in fs)
     prompt = REPORT_PROMPT.format(round=round_no, rounds_budget=store.state().get("rounds_budget"),
                                   ready=ready, n_findings=len(fs), findings=ctx[:9000])
-    proc = run_pi(prompt, provider=cfg["worker_provider"], model=cfg["worker_model"],
-                  cwd=str(store.dir), timeout=300)
-    text = (proc.stdout or "").strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3]
-    if proc.returncode != 0 or not text:
-        text = f"# Сводка — Round {round_no}\n\n(синтез не удался; см. findings/)"
-    return store.write_report(round_no, _fix_finding_links(text))
+    # Ретраим: синтез часто падает из-за временной недоступности LLM. На стойком отказе
+    # НЕ пишем фейковую сводку (она засчитала бы раунд пройденным) — бросаем исключение:
+    # раунд останется незавершённым, run() встанет на паузу, на resume синтез повторится.
+    last = ""
+    for attempt in range(3):
+        proc = run_pi(prompt, provider=cfg["worker_provider"], model=cfg["worker_model"],
+                      cwd=str(store.dir), timeout=300)
+        text = _clean(proc.stdout)
+        if proc.returncode == 0 and text:
+            return store.write_report(round_no, _fix_finding_links(text))
+        last = f"rc={proc.returncode}, {(proc.stderr or '').strip()[:200] or 'пустой ответ'}"
+        store.log_event("synth_retry", round=round_no, attempt=attempt + 1, error=last)
+        if attempt < 2:
+            time.sleep(3)
+    raise RuntimeError(f"синтез сводки Round {round_no} не удался после 3 попыток: {last}")
 
 
 def _fix_finding_links(text: str) -> str:
@@ -138,10 +144,14 @@ def interim_report(store: RunStore) -> str:
 
 def checkpoint(store: RunStore, round_no: int) -> bool:
     """Собрать ссылки, написать сводку, решить — продолжать ли. Возвращает решение."""
-    harvested = harvest_links(store, round_no)
-    report_rel = synth_report(store, round_no)
-    ready = [t for t in store.backlog() if t.get("status") == "ready"]
-    cont = round_no < int(store.state().get("rounds_budget", 1)) and len(ready) > 0
-    store.log_event("checkpoint", round=round_no, report=report_rel,
-                    harvested=len(harvested), backlog_ready=len(ready), will_continue=cont)
-    return cont
+    store.save_state({**store.state(), "phase": "synth"})  # сигнал UI: идёт синтез сводки раунда
+    try:
+        harvested = harvest_links(store, round_no)
+        report_rel = synth_report(store, round_no)
+        ready = [t for t in store.backlog() if t.get("status") == "ready"]
+        cont = round_no < int(store.state().get("rounds_budget", 1)) and len(ready) > 0
+        store.log_event("checkpoint", round=round_no, report=report_rel,
+                        harvested=len(harvested), backlog_ready=len(ready), will_continue=cont)
+        return cont
+    finally:
+        store.save_state({**store.state(), "phase": None})  # снять метку (в т.ч. при провале синтеза)

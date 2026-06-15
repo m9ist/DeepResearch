@@ -208,6 +208,7 @@ def run_worker(store: RunStore, task_id: str, timeout: int = 600) -> str:
         proc.kill()
         procs.unregister(task_id)
         store.update_task(task_id, status="ready")
+        progress.append_line(task_id, f"✗ таймаут воркера ({timeout}s) — процесс убит")  # чтобы консоль не была пустой
         _save_console(store, task_id)
         progress.clear(task_id)
         store.log_event("worker_end", task_id=task_id, status="timeout")
@@ -219,6 +220,12 @@ def run_worker(store: RunStore, task_id: str, timeout: int = 600) -> str:
     if proc.returncode != 0 or not body:
         err = (proc.stderr.read() if proc.stderr else "") or ""
         store.update_task(task_id, status="ready")
+        # returncode при hard-kill (Pause) — не «ошибка», задание просто вернулось в ready
+        status = "killed" if proc.returncode and proc.returncode < 0 else "error"
+        # пишем причину в консоль — иначе у быстро падающих воркеров (LLM недоступен и т.п.)
+        # progress пуст и пост-мортем не сохраняется (консоль не открывается)
+        progress.append_line(task_id, f"✗ pi завершился: код {proc.returncode} ({status})"
+                             + (f"\nstderr: {err[:800]}" if err.strip() else "\n(без stderr; вероятно, ранний выход — проверь LLM на :8080)"))
         _save_console(store, task_id)
         progress.clear(task_id)
         # returncode при hard-kill (Pause) — не «ошибка», задание просто вернулось в ready

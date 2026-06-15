@@ -35,7 +35,8 @@ def run_round(store: RunStore, should_stop=None) -> dict:
     st = store.state()
     # рабочий раунд = (пройдено по Report'ам) + 1; незавершённый раунд переигрывается с тем же номером
     rnd = completed_rounds(store) + 1
-    budget = cfg["round_time_budget_sec"]["first" if rnd == 1 else "rest"]
+    tmin = int(cfg.get("round_timeout_min", 10))
+    budget = None if tmin <= 0 else tmin * 60   # None = без таймаута (раунд идёт, пока есть ready)
 
     def cur_conc() -> int:
         try:
@@ -43,17 +44,20 @@ def run_round(store: RunStore, should_stop=None) -> dict:
         except Exception:  # noqa: BLE001
             return 3
 
-    store.save_state({**st, "status": "running", "round": rnd, "round_started_at": now_iso()})
+    store.save_state({**st, "status": "running", "round": rnd,
+                      "round_started_at": now_iso(), "round_budget_sec": budget})
     store.log_event("round_start", round=rnd, budget_sec=budget, concurrency=cur_conc())
-    deadline = time.monotonic() + budget
+    deadline = (time.monotonic() + budget) if budget is not None else None
 
     ready = [t["id"] for t in store.backlog() if t.get("status") == "ready"]
     done, failed, idx = 0, 0, 0
     pending: set = set()
 
     def can_submit() -> bool:
-        # concurrency читаем на лету — слайдер из UI меняет число слотов в реальном времени
-        return idx < len(ready) and len(pending) < cur_conc() and time.monotonic() < deadline and not stop()
+        # concurrency читаем на лету — слайдер из UI меняет число слотов в реальном времени;
+        # deadline=None → без таймаута (добор до опустошения ready)
+        return (idx < len(ready) and len(pending) < cur_conc()
+                and (deadline is None or time.monotonic() < deadline) and not stop())
 
     with ThreadPoolExecutor(max_workers=CONCURRENCY_CAP) as ex:
         while can_submit():
@@ -107,4 +111,9 @@ def run(store: RunStore, should_stop=None) -> dict:
             harvest_links(store, rnd)
             store.save_state({**store.state(), "status": "paused", "round": completed_rounds(store)})
             return {"rounds": rounds, "status": "paused"}
-        checkpoint(store, rnd)  # синтез сводки + харвест; решение продолжать — на след. итерации сверху
+        try:
+            checkpoint(store, rnd)  # синтез сводки + харвест; решение продолжать — на след. итерации сверху
+        except Exception as e:  # noqa: BLE001 — синтез не удался (напр. LLM лёг): раунд НЕ засчитываем, пауза
+            store.log_event("checkpoint_failed", round=rnd, error=str(e)[:300])
+            store.save_state({**store.state(), "status": "paused", "round": completed_rounds(store)})
+            return {"rounds": rounds, "status": "paused"}
