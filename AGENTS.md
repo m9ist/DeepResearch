@@ -114,7 +114,8 @@ PY -m orchestrator.cli run runs\<id>
 ### «не тащит транскрипт YouTube» / «IP-бан»
 `youtube_transcript_api` банит IP за частые запросы. Лечение — лестница провайдеров
 с fail-over (`tools/yt_fetch.py`, конфиг `tools/yt_providers.json`, ADR 0003): при
-бане YT-API (бэкофф ×2, ≤1 запрос/5мин) запрос проваливается на платный apify-фолбэк.
+бане YT-API (бэкофф ×2, ≤1 запрос/5мин) запрос проваливается на `supadata`
+(100/мес), затем на платный `apify` (300/мес).
 Кэш по `videoId` и учёт квоты/бана — общие (`tools/tmp/`). Если apify не настроен
 (пустой токен в `tools/yt_secrets.json` / `DR_APIFY_TOKEN`) — фолбэка нет, и при
 исчерпании лестницы `web_fetch` отдаёт воркеру терминальную пометку, НЕ лезет в

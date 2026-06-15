@@ -7,10 +7,17 @@
     "languages": ["ru", "en"]
   },
   {
+    "type": "supadata",
+    "enabled": true,
+    "monthly_quota": 100,
+    "mode": "auto",
+    "timeout_sec": 90
+  },
+  {
     "type": "apify_supreme_coder",
     "enabled": true,
     "actor": "supreme_coder~youtube-transcript-scraper",
     "monthly_quota": 300,
-    "timeout_sec": 280
+    "timeout_sec": 180
   }
 ]

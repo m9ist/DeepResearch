@@ -96,7 +96,7 @@ docker compose -f searxng\docker-compose.yml up -d
 - **Конфиг лестницы** — [tools/yt_providers.json](tools/yt_providers.json) (коммитим):
   порядок = приоритет, `enabled`, интервалы/бэкофф и квота. Сейчас:
   `youtube_transcript_api` (≤1 запрос / 5 мин, бэкофф ×2 при IP-бане) →
-  `apify_supreme_coder` (платный фолбэк, квота/мес).
+  `supadata` (100 запросов/мес) → `apify_supreme_coder` (платный, 300/мес).
 - **Секреты** — `tools/yt_secrets.json` (gitignore; образец — `yt_secrets.example.json`):
   токен apify сюда либо в `DR_APIFY_TOKEN`.
 - **Общее состояние** (под локом), **кэш** и **лог** — в `tools/tmp/`

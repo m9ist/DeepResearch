@@ -295,14 +295,63 @@ def _provider_apify(url, video_id, languages, pconf, secret):
     return segs, title
 
 
+def _supadata_get(url: str, headers: dict, deadline: float):
+    """GET с разбором HTTP-ошибок. Возвращает (status, data)."""
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=max(1.0, deadline - time.time())) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as ex:  # вкл. 429 (rate-limit) — промах, квота считается отдельно
+        raise ProviderMiss(f"HTTP {ex.code}") from ex
+    except Exception as ex:  # noqa: BLE001 — таймаут/сеть = промах
+        raise ProviderMiss(type(ex).__name__) from ex
+
+
+def _provider_supadata(url, video_id, languages, pconf, secret):
+    token = secret.get("token") or os.environ.get("DR_SUPADATA_API_KEY")
+    base = pconf.get("base_url", "https://api.supadata.ai/v1")
+    deadline = time.time() + pconf.get("timeout_sec", 90)
+    params = {"url": url, "mode": pconf.get("mode", "auto")}  # text опускаем → chunked-формат
+    if languages:
+        params["lang"] = languages[0]  # supadata берёт один язык; нет → отдаёт первый доступный
+    # User-Agent обязателен: без него Cloudflare перед api.supadata.ai отдаёт 403 (error 1010).
+    headers = {"x-api-key": token, "User-Agent": "Mozilla/5.0 (deep_research)", "Accept": "application/json"}
+
+    status, data = _supadata_get(f"{base}/transcript?" + urllib.parse.urlencode(params), headers, deadline)
+    if status == 202:  # длинное видео — асинхронная обработка, поллим job
+        job_id = data.get("jobId")
+        if not job_id:
+            raise ProviderMiss("no_jobId")
+        job_url = f"{base}/transcript/{urllib.parse.quote(job_id)}"
+        while True:
+            if time.time() >= deadline:
+                raise ProviderMiss("job_timeout")
+            time.sleep(3.0)
+            _, data = _supadata_get(job_url, headers, deadline)
+            st = data.get("status")
+            if st == "completed":
+                break
+            if st == "failed":
+                err = (data.get("error") or {}).get("message") or "failed"
+                raise ProviderMiss(f"job_failed: {err}")
+            # queued / active → ждём дальше
+
+    content = data.get("content")
+    if not content:
+        raise ProviderMiss("no_content")
+    segs = [(c.get("offset", 0) / 1000.0, c.get("text", "")) for c in content]  # offset мс → сек
+    return segs, None  # заголовок — фолбэком через oembed
+
+
 PROVIDERS = {
     "youtube_transcript_api": {"fetch": _provider_ytapi, "needs_secret": False},
-    "apify_supreme_coder": {"fetch": _provider_apify, "needs_secret": True},
+    "supadata": {"fetch": _provider_supadata, "needs_secret": True, "token_env": "DR_SUPADATA_API_KEY"},
+    "apify_supreme_coder": {"fetch": _provider_apify, "needs_secret": True, "token_env": "DR_APIFY_TOKEN"},
 }
 
 
-def _has_token(secret: dict) -> bool:
-    return bool(secret.get("token") or os.environ.get("DR_APIFY_TOKEN"))
+def _has_token(secret: dict, impl: dict) -> bool:
+    return bool(secret.get("token") or os.environ.get(impl.get("token_env", "")))
 
 
 def _load_providers(paths: Paths):
@@ -347,7 +396,7 @@ def run_fetch(url: str, video_id: str, languages, out_path: Path):
             _log(paths.log, ts=now_iso(), video_id=video_id, provider=ptype, outcome="skip_unknown")
             continue
         secret = secrets.get(ptype, {}) if isinstance(secrets, dict) else {}
-        if impl["needs_secret"] and not _has_token(secret):
+        if impl["needs_secret"] and not _has_token(secret, impl):
             _log(paths.log, ts=now_iso(), video_id=video_id, provider=ptype, outcome="skip_no_secret")
             continue
 
