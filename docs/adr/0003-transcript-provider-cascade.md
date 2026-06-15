@@ -50,5 +50,7 @@ Worker'ов.
 [index.ts](../../extension/index.ts) поднят 120→300 c под холодный старт apify.
 
 **Статус: proposed.** Заменяет старый temp-marker троттл (`DR_YT_MIN_INTERVAL`).
-Провайдеры v1: `youtube_transcript_api` → `apify_supreme_coder`. Новых
-pip-зависимостей нет (apify через stdlib `urllib`).
+Провайдеры: `youtube_transcript_api` → `supadata` (100/мес) →
+`apify_supreme_coder` (300/мес). Новых pip-зависимостей нет (все провайдеры
+через stdlib `urllib`). Замечание по `supadata`: требует заголовок `User-Agent`
+(иначе Cloudflare 403/1010) и отдаёт текст крупными чанками (грубые тайм-коды).
