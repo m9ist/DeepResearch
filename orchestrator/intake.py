@@ -77,6 +77,68 @@ def _build_launchers(run_dir: Path, agent: str, slug: str, provider: str, model:
     _write_cmd(run_dir / "continue.cmd", cont)
 
 
+REFINE_BRIEF_TEMPLATE = """# Доуточнение ТЗ исследования
+
+Это НЕ новое исследование, а уточнение УЖЕ идущего. Ниже — исходная идея,
+текущий ТЗ и список незавершённых заданий бэклога.
+
+## Как действуй
+1. Спроси меня (по одному вопросу за раз), что мне нравится / не нравится в
+   текущем направлении и на чём сфокусироваться.
+2. По итогам обсуждения ПЕРЕЗАПИШИ файл `spec.md` — новую, уточнённую версию ТЗ.
+3. Сформируй файл `refine_decisions.json` СТРОГО в таком формате:
+
+   {{"drop": ["t0009"], "keep": ["t0007"],
+     "add": [{{"kind": "search", "title": "...", "query": "поисковый запрос"}},
+             {{"kind": "fetch", "title": "...", "url": "https://..."}}],
+     "reason": {{"t0009": "почему убрали"}}}}
+
+   - `drop`/`keep` — id ТОЛЬКО из списка незавершённых заданий ниже (что убрать / оставить).
+   - `add` — НОВЫЕ задания под уточнённый фокус: `search` с `query` (поисковый запрос)
+     либо `fetch` с `url`. ОБЯЗАТЕЛЬНО предложи новые задания, если уточнения открыли
+     новые вопросы/направления — иначе исследование не сдвинется. Если новых не нужно — `add: []`.
+4. НИЧЕГО не запускай (никаких раундов/поиска) — только обнови `spec.md` и запиши
+   `refine_decisions.json`. В конце скажи мне нажать в веб-морде «подхватить решения».
+
+## Исходная идея
+{idea}
+
+## Текущий ТЗ (spec.md)
+{spec}
+
+## Незавершённые задания (ready) — пометь актуальность
+{tasks}
+"""
+
+
+def build_refine(run_dir: Path, agent: str = "pi",
+                 provider: str = "ollama", model: str = "qwen/qwen3.6-35b-a3b") -> int:
+    """Сгенерировать бриф уточнения (идея + текущий ТЗ + незавершённые задания) и
+    .cmd-лаунчеры (своя сессия sessions-refine). Возвращает число ready-заданий в брифе."""
+    store = RunStore(run_dir)
+    idea = (run_dir / "idea.txt").read_text(encoding="utf-8").strip() if (run_dir / "idea.txt").exists() else "(idea.txt нет)"
+    spec = store.spec_text().strip() or "(spec.md пуст)"
+    ready = [t for t in store.backlog() if t.get("status") == "ready"]
+    rows = [f"- {t['id']} [{t.get('kind', '')}] {t.get('title', '')}"
+            + (f" — {t.get('query') or t.get('url')}" if (t.get('query') or t.get('url')) else "")
+            for t in ready]
+    tasks = "\n".join(rows) or "(незавершённых заданий нет)"
+    (run_dir / "refine_brief.md").write_text(
+        REFINE_BRIEF_TEMPLATE.format(idea=idea, spec=spec, tasks=tasks), encoding="utf-8")
+    (run_dir / "sessions-refine").mkdir(exist_ok=True)
+    rd, brief, sess = str(run_dir), str(run_dir / "refine_brief.md"), str(run_dir / "sessions-refine")
+    if agent == "claude":
+        start = [f'cd /d "{rd}"',
+                 'claude "Прочитай файл refine_brief.md в этой папке и действуй строго по нему '
+                 '(обнови spec.md и запиши refine_decisions.json)."']
+    else:
+        start = [f'cd /d "{rd}"',
+                 f'pi @"{brief}" --session-dir "{sess}" --provider {provider} --model "{model}" --name "{run_dir.name}-refine"']
+    _write_cmd(run_dir / "refine.cmd", start)
+    store.log_event("refine_built", agent=agent, ready=len(ready))
+    return len(ready)
+
+
 def create_intake_run(idea: str, name: str, agent: str = "pi",
                       provider: str = "ollama", model: str = "qwen/qwen3.6-35b-a3b") -> str:
     slug = slugify(name)
