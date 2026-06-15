@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ DEFAULT_CONFIG = {
     "worker_provider": "ollama",
     "worker_model": "qwen/qwen3.6-35b-a3b",
     "rounds_budget": 3,
-    "round_time_budget_sec": {"first": 420, "rest": 900},
+    "round_timeout_min": 10,   # тайм-бокс раунда, мин; 0 = без таймаута (раунд идёт, пока есть ready)
     "max_urls_per_task": 3,
     "search_provider": "searxng",
     "searxng_url": "http://localhost:8888",
@@ -83,6 +84,35 @@ class RunStore:
     def spec_text(self) -> str:
         p = self.dir / "spec.md"
         return p.read_text(encoding="utf-8") if p.exists() else ""
+
+    def snapshot_spec(self) -> str | None:
+        """Историчность ТЗ: снять неизменяемую копию текущего spec.md в
+        spec_versions/spec.vN.md, ЕСЛИ содержимое изменилось с последней версии.
+        spec.md остаётся «текущим» (его читают все). No-op для пустого/идентичного."""
+        text = self.spec_text().strip()
+        if not text:
+            return None
+        with self._lock:
+            vdir = self.dir / "spec_versions"
+            vdir.mkdir(exist_ok=True)
+            vers = sorted(int(m.group(1)) for p in vdir.glob("spec.v*.md")
+                          if (m := re.match(r"spec\.v(\d+)$", p.stem)))
+            if vers:
+                if (vdir / f"spec.v{vers[-1]}.md").read_text(encoding="utf-8").strip() == text:
+                    return None  # без изменений — не плодим версии
+                n = vers[-1] + 1
+            else:
+                n = 1
+            _atomic_write(vdir / f"spec.v{n}.md", self.spec_text())
+            return f"spec_versions/spec.v{n}.md"
+
+    def spec_versions(self) -> list[dict]:
+        vdir = self.dir / "spec_versions"
+        if not vdir.exists():
+            return []
+        out = [{"n": int(m.group(1)), "rel": f"spec_versions/{p.name}"}
+               for p in vdir.glob("spec.v*.md") if (m := re.match(r"spec\.v(\d+)$", p.stem))]
+        return sorted(out, key=lambda x: x["n"])
 
     # ---- backlog (jsonl) ----
     def backlog(self) -> list[dict]:
