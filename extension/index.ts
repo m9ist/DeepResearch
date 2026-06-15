@@ -83,7 +83,7 @@ async function fetchYouTube(url: string, vid: string): Promise<string> {
   const sources = path.join(RUN_DIR, "sources");
   const stdout: string = await new Promise((resolve, reject) => {
     cp.execFile(PYTHON, [YT_SCRIPT, url, "--outdir", sources],
-      { timeout: 120000, encoding: "utf-8", maxBuffer: 4 << 20 },
+      { timeout: 300000, encoding: "utf-8", maxBuffer: 4 << 20 },  // 300с: холодный старт apify-фолбэка
       (err: any, out: string, errout: string) =>
         err ? reject(new Error((errout || err.message || "").toString())) : resolve(out.toString()));
   });
@@ -158,22 +158,18 @@ export default function (pi: any) {
       required: ["url"],
     },
     async execute(_toolCallId: string, params: { url: string }, signal: AbortSignal) {
-      // YouTube — тащим транскрипт через скрипт; при неудаче падаем на обычный фетч
-      let ytNote = "";
+      // YouTube — тащим транскрипт через утилиту (кэш → лестница провайдеров с fail-over).
+      // Страница-фолбэк для видео бесполезна (JS-скелет без транскрипта) → не рендерим, отвечаем терминально.
       const vid = (RUN_DIR && YT_SCRIPT) ? ytId(params.url) : null;
       if (vid) {
         try {
           return textResult(await fetchYouTube(params.url, vid));
         } catch (e: any) {
           const msg = (e?.message || String(e)).toString();
-          // IP-бан (rate-limit) — headless страницы транскрипт всё равно не даст, только зря молотим.
-          if (/blocking requests from your IP|RequestBlocked|IpBlocked|too many requests/i.test(msg)) {
-            return textResult(
-              `[YouTube заблокировал запросы транскриптов с этого IP (rate-limit). Транскрипт сейчас ` +
-              `НЕДОСТУПЕН — повтори это задание позже (бан обычно временный, ~часы) либо нужен ` +
-              `резидентный прокси. НЕ ищи транскрипт в вебе и не пытайся достать его из страницы — его там нет.]`);
-          }
-          ytNote = `[YT-транскрипт недоступен: ${msg.slice(0, 160)}; ниже — страница]\n\n`;
+          return textResult(
+            `[Транскрипт YouTube недоступен: перепробованы все провайдеры (${msg.slice(0, 160)}). ` +
+            `Причина может быть временной (IP-бан YouTube, исчерпана квота или сбой apify-фолбэка) — ` +
+            `повтори это задание позже. НЕ ищи транскрипт в вебе и не пытайся достать его со страницы — его там нет.]`);
         }
       }
       try {
@@ -198,7 +194,7 @@ export default function (pi: any) {
           ? text.slice(0, FETCH_MAX) + `\n\n[...обрезано на ${FETCH_MAX} символах из ${text.length}]`
           : text;
         const note = rel ? `\n\n[сырьё сохранено: ${rel}]` : "";
-        return textResult(`${ytNote}${jsNote}Содержимое ${params.url}:\n\n${clipped}${note}`);
+        return textResult(`${jsNote}Содержимое ${params.url}:\n\n${clipped}${note}`);
       } catch (err: any) {
         return textResult(`web_fetch: ошибка загрузки ${params.url}: ${err?.message || String(err)}`);
       }

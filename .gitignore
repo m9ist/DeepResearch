@@ -10,6 +10,9 @@ runs/
 # временные папки скриптов
 tools/tmp/
 
+# секреты провайдеров транскриптов (токены) — образец в tools/yt_secrets.example.json
+tools/yt_secrets.json
+
 # персист истории загрузки LLM (12ч, локальное)
 .llm_load.json
 

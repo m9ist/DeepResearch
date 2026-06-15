@@ -1,0 +1,16 @@
+[
+  {
+    "type": "youtube_transcript_api",
+    "enabled": true,
+    "min_interval_sec": 300,
+    "ban_backoff": { "factor": 2, "max_interval_sec": 86400 },
+    "languages": ["ru", "en"]
+  },
+  {
+    "type": "apify_supreme_coder",
+    "enabled": true,
+    "actor": "supreme_coder~youtube-transcript-scraper",
+    "monthly_quota": 300,
+    "timeout_sec": 280
+  }
+]
