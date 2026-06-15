@@ -44,7 +44,7 @@ deep_research/                 <- репозиторий (этот корень 
 ├── orchestrator/              <- state-машина: planner, loop, worker, checkpoint, store, progress…
 ├── web/                       <- FastAPI + Jinja (дашборд, SSE, контролы) — запускается как `-m web`
 ├── extension/index.ts         <- pi-extension: web_search / web_fetch (+YouTube, +JS-рендер)
-├── tools/                     <- youtube_one.py, fetch_page.py, rescan_failed.py, compile_rounds.py
+├── tools/                     <- youtube_one.py + yt_fetch.py (+yt_providers.json), fetch_page.py, rescan_failed.py, compile_rounds.py
 ├── prompts/                   <- intake_instructions.md (интервью)
 ├── searxng/                   <- docker-compose + settings.yml
 ├── docs/                      <- SPEC, BACKLOG, ADR
@@ -85,7 +85,28 @@ docker compose -f searxng\docker-compose.yml up -d
 Тонкие настройки — env воркеров (в `orchestrator/worker.py`) и `config.json` Run'а
 (`round_timeout_min` — тайм-бокс раунда, 0=без):
 `DR_SEARXNG_URL`, `DR_FETCH_MAX` (15000), `DR_YT_MAX` (80000), `DR_JS_MIN` (400),
-`DR_YT_MIN_INTERVAL` (1.5 — троттл YT-запросов), `DR_NET_TIMEOUT_MS` (20000), `DR_LLM_SLOTS_URL`.
+`DR_NET_TIMEOUT_MS` (20000), `DR_LLM_SLOTS_URL`.
+
+### Транскрипты YouTube
+
+`web_fetch` для YouTube-URL тащит транскрипт через [tools/youtube_one.py](tools/youtube_one.py)
+→ [tools/yt_fetch.py](tools/yt_fetch.py): кэш по `videoId` → **лестница провайдеров**
+с fail-over без блокировки (см. [ADR 0003](docs/adr/0003-transcript-provider-cascade.md)).
+
+- **Конфиг лестницы** — [tools/yt_providers.json](tools/yt_providers.json) (коммитим):
+  порядок = приоритет, `enabled`, интервалы/бэкофф и квота. Сейчас:
+  `youtube_transcript_api` (≤1 запрос / 5 мин, бэкофф ×2 при IP-бане) →
+  `apify_supreme_coder` (платный фолбэк, квота/мес).
+- **Секреты** — `tools/yt_secrets.json` (gitignore; образец — `yt_secrets.example.json`):
+  токен apify сюда либо в `DR_APIFY_TOKEN`.
+- **Общее состояние** (под локом), **кэш** и **лог** — в `tools/tmp/`
+  (`yt_state.json`, `.yt_cache/`, `yt_runs.jsonl`).
+
+Тот же пайплайн использует и `E:\SecondBrain\programs\youtube_one.py`: он импортирует
+`yt_fetch` (путь через `DR_YT_FETCH_DIR`, дефолт `K:\repos\deep_research\tools`), поэтому
+оба инструмента делят **один кэш, одну квоту apify и общий учёт IP-бана**.
+Переопределяемые пути: `DR_YT_PROVIDERS`, `DR_YT_SECRETS`, `DR_YT_STATE`,
+`DR_YT_CACHE_DIR`, `DR_YT_LOG`, `DR_YT_FETCH_DIR`.
 
 ## Запуск
 
