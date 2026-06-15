@@ -16,12 +16,13 @@ from pathlib import Path
 import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from orchestrator import progress
 from orchestrator.checkpoint import interim_report
-from orchestrator.intake import create_intake_run, ping_agent, suggest_name
+from orchestrator.intake import build_refine, create_intake_run, ping_agent, suggest_name
 from orchestrator.store import RunStore
 from .llm_meter import meter
 from .runner import manager
@@ -48,6 +49,7 @@ def pi_models() -> list[dict]:
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 templates.env.filters["ts"] = lambda s: (s or "").replace("T", " ").replace("Z", "")
 app = FastAPI(title="Deep Research Viewer")
+app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
 _MD = ["extra", "tables", "fenced_code", "sane_lists"]
 _LIST_RE = re.compile(r"^\s*([-*+]|\d+[.)])\s+")
@@ -201,7 +203,8 @@ def run_view(request: Request, name: str):
         t["has_console"] = _has_console(d, t.get("id", ""))
     return templates.TemplateResponse(request, "run.html", {
         "name": name, "state": state, "config": s.config() if (d / "config.json").exists() else {},
-        "spec_html": render_md(s.spec_text()), "findings": findings, "reports": reports,
+        "spec_html": render_md(s.spec_text()), "spec_versions": s.spec_versions(),
+        "findings": findings, "reports": reports,
         "backlog": backlog, "events": list(reversed(s.events())),
         "has_intake": (d / "intake.cmd").exists(), "has_spec": (d / "spec.md").exists() and bool(s.spec_text().strip()),
         "spec_mtime": (d / "spec.md").stat().st_mtime if (d / "spec.md").exists() else None,
@@ -314,7 +317,8 @@ def _run_snapshot(name: str, d: Path) -> dict:
         concurrency = None
     return {
         "status": st.get("status"), "round": st.get("round"), "rounds_budget": st.get("rounds_budget"),
-        "round_started_at": st.get("round_started_at"), "is_active": manager.is_active(name),
+        "round_started_at": st.get("round_started_at"), "round_budget_sec": st.get("round_budget_sec"),
+        "phase": st.get("phase"), "is_active": manager.is_active(name),
         "concurrency": concurrency,
         "active_other": active_other, "counters": counters, "inflight": inflight, "recent": recent,
         "findings": findings, "reports": reports, "backlog": backlog, "llm": meter.snapshot(),
@@ -416,6 +420,14 @@ def set_concurrency(name: str, n: int):
     return {"ok": True, "concurrency": n}
 
 
+@app.post("/run/{name}/set-timeout")
+def set_timeout(name: str, m: int):
+    if m not in (0, 5, 10, 30):
+        raise HTTPException(400, "допустимо: 0 (без таймаута), 5, 10, 30 мин")
+    RunStore(_run_dir(name)).update_config(round_timeout_min=m)
+    return {"ok": True, "round_timeout_min": m}
+
+
 @app.post("/run/{name}/set-model")
 def set_model(name: str, provider: str, model: str):
     if (provider, model) not in {(m["provider"], m["model"]) for m in pi_models()}:
@@ -443,6 +455,8 @@ def spec_status(name: str):
     text = s.spec_text()
     sp = d / "spec.md"
     has = sp.exists() and bool(text.strip())
+    if has:
+        s.snapshot_spec()  # зафиксировать версию ТЗ при подхвате (интервью/уточнение)
     return {"has_spec": has, "spec_html": render_md(text) if has else "",
             "mtime": sp.stat().st_mtime if sp.exists() else None}
 
@@ -458,6 +472,88 @@ def launch_intake(name: str, which: str = "intake"):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"не удалось запустить: {e}")
     return {"ok": True}
+
+
+@app.post("/run/{name}/refine-launch")
+def refine_launch(name: str, agent: str = "pi"):
+    """Доуточнение ТЗ: генерим свежий бриф (идея+спек+незавершённые задания) и стартуем pi/claude в терминале."""
+    d = _run_dir(name)
+    s = RunStore(d)
+    s.snapshot_spec()  # зафиксировать текущую версию ТЗ ДО того, как агент перезапишет spec.md
+    cfg = s.config()
+    build_refine(d, agent, provider=cfg.get("worker_provider", "ollama"),
+                 model=cfg.get("worker_model", "qwen/qwen3.6-35b-a3b"))
+    cmd = d / "refine.cmd"
+    try:
+        os.startfile(str(cmd))  # noqa: S606
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"не удалось запустить: {e}")
+    return {"ok": True}
+
+
+@app.post("/run/{name}/refine-apply")
+def refine_apply(name: str):
+    """Подхватить решения агента: refine_decisions.json → проставить статусы (drop→dropped, keep→ready)."""
+    d = _run_dir(name)
+    s = RunStore(d)
+    s.snapshot_spec()  # зафиксировать новую версию ТЗ (агент уже перезаписал spec.md в диалоге)
+    p = d / "refine_decisions.json"
+    if not p.exists():
+        raise HTTPException(404, "refine_decisions.json ещё нет — агент не записал решения")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"не разобрать refine_decisions.json: {str(e)[:120]}")
+    dropped = kept = added = 0
+    missing: list[str] = []
+    for tid in (data.get("drop") or []):
+        t = s.get_task(tid)
+        if not t:
+            missing.append(tid)
+        elif t.get("status") == "ready":
+            s.update_task(tid, status="dropped"); dropped += 1
+    for tid in (data.get("keep") or []):
+        t = s.get_task(tid)
+        if t and t.get("status") == "dropped":
+            s.update_task(tid, status="ready"); kept += 1
+    for nt in (data.get("add") or []):                       # новые задания под уточнённый фокус
+        title = (nt.get("title") or nt.get("query") or nt.get("url") or "").strip()
+        if not title:
+            continue
+        task = {"kind": nt.get("kind", "search"), "title": title[:200], "source": "refine"}
+        if nt.get("query"):
+            task["query"] = nt["query"]
+        if nt.get("url"):
+            task["url"] = nt["url"]
+        s.add_task(task); added += 1
+    s.log_event("refine_applied", dropped=dropped, kept=kept, added=added, missing=len(missing))
+    return {"ok": True, "dropped": dropped, "kept": kept, "added": added, "missing": missing}
+
+
+@app.post("/run/{name}/task/{tid}/drop")
+def task_drop(name: str, tid: str):
+    s = RunStore(_run_dir(name))
+    t = s.get_task(tid)
+    if not t:
+        raise HTTPException(404, "задание не найдено")
+    if t.get("status") != "ready":
+        raise HTTPException(400, f"убрать можно только ready (сейчас {t.get('status')})")
+    s.update_task(tid, status="dropped")
+    s.log_event("task_dropped", task_id=tid)
+    return {"ok": True, "status": "dropped"}
+
+
+@app.post("/run/{name}/task/{tid}/keep")
+def task_keep(name: str, tid: str):
+    s = RunStore(_run_dir(name))
+    t = s.get_task(tid)
+    if not t:
+        raise HTTPException(404, "задание не найдено")
+    if t.get("status") != "dropped":
+        raise HTTPException(400, f"вернуть можно только dropped (сейчас {t.get('status')})")
+    s.update_task(tid, status="ready")
+    s.log_event("task_kept", task_id=tid)
+    return {"ok": True, "status": "ready"}
 
 
 def _recover_orphans() -> None:
@@ -477,7 +573,7 @@ def _recover_orphans() -> None:
                     s.update_task(t["id"], status="ready")
             # незавершённый раунд (без Report'а) не засчитываем — round = число пройденных стадий
             completed = len(list((d / "reports").glob("round-*.md"))) if (d / "reports").exists() else 0
-            s.save_state({**st, "status": "paused", "round": completed})
+            s.save_state({**st, "status": "paused", "round": completed, "phase": None})
             s.log_event("recovered_to_paused", round=completed)
 
 

@@ -1,0 +1,7 @@
+<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Deep Research">
+  <circle cx="16" cy="16" r="14" fill="none" stroke="#0969da" stroke-width="2.5"/>
+  <path d="M16 16 L16 2 A14 14 0 0 1 26.7 7 Z" fill="#0969da" opacity="0.4"/>
+  <line x1="16" y1="16" x2="25.6" y2="7.8" stroke="#0969da" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="10.5" cy="10.5" r="1.5" fill="#0969da"/>
+  <circle cx="21" cy="21" r="1.2" fill="#0969da"/>
+</svg>
