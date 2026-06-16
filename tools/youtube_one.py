@@ -51,7 +51,11 @@ def main():
     else:
         out_path = (Path(__file__).resolve().parent / "tmp" / f"yt-{video_id}" / "transcript.txt").resolve()
 
-    result = yt_fetch.run_fetch(args.url, video_id, languages, out_path)
+    try:
+        result = yt_fetch.run_fetch(args.url, video_id, languages, out_path)
+    except yt_fetch.VideoUnavailable:
+        print(f"VIDEO_UNAVAILABLE: видео {video_id} удалено или приватно", file=sys.stderr)
+        sys.exit(2)
     if result is None:
         print("Ошибка загрузки транскрипта: все провайдеры исчерпаны", file=sys.stderr)
         sys.exit(2)

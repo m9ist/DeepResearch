@@ -166,6 +166,11 @@ export default function (pi: any) {
           return textResult(await fetchYouTube(params.url, vid));
         } catch (e: any) {
           const msg = (e?.message || String(e)).toString();
+          if (/VIDEO_UNAVAILABLE/.test(msg)) {
+            return textResult(
+              `[Видео YouTube удалено или приватно — транскрипта не существует. НЕ повторяй ` +
+              `это задание и не ищи транскрипт в вебе/на странице: его нет нигде.]`);
+          }
           return textResult(
             `[Транскрипт YouTube недоступен: перепробованы все провайдеры (${msg.slice(0, 160)}). ` +
             `Причина может быть временной (IP-бан YouTube, исчерпана квота или сбой apify-фолбэка) — ` +

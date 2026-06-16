@@ -60,6 +60,10 @@ class FetchResult:
     resolved_by: str  # type провайдера или "cache"
 
 
+class VideoUnavailable(Exception):
+    """Видео удалено/приватно/не найдено — транскрипта не существует, лестницу не гоняем."""
+
+
 class ProviderBan(Exception):
     """IP-блок/бан — растим ban_level."""
 
@@ -88,14 +92,29 @@ def extract_video_id(url: str) -> str:
     return m.group(1)
 
 
-def fetch_title(url: str) -> str:
+def _oembed(url: str):
+    """Дешёвая проверка доступности видео + заголовок через oEmbed (не квотируется,
+    не банится как транскрипт-API). Возвращает:
+      ('ok', title)         — видео живо;
+      ('unavailable', None) — удалено/приватно/не найдено (404/401);
+      ('unknown', None)     — неопределённо (5xx/сеть/таймаут) → не блокируем."""
+    ep = "https://www.youtube.com/oembed?url=" + urllib.parse.quote(url, safe="") + "&format=json"
+    req = urllib.request.Request(ep, headers={"User-Agent": "Mozilla/5.0 (deep_research)"})
     try:
-        oembed = "https://www.youtube.com/oembed?url=" + urllib.parse.quote(url, safe="") + "&format=json"
-        with urllib.request.urlopen(oembed, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
-        return data.get("title") or extract_video_id(url)
-    except Exception:  # noqa: BLE001 — заголовок не критичен, фолбэк на videoId
-        return extract_video_id(url)
+        return "ok", (data.get("title") or None)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 404):  # приватное / удалённое / не найдено
+            return "unavailable", None
+        return "unknown", None
+    except Exception:  # noqa: BLE001 — сеть/таймаут: неопределённо, не блокируем лестницу
+        return "unknown", None
+
+
+def fetch_title(url: str) -> str:
+    _, title = _oembed(url)
+    return title or extract_video_id(url)
 
 
 def ms_to_timestamp(seconds: float) -> str:
@@ -384,6 +403,14 @@ def run_fetch(url: str, video_id: str, languages, out_path: Path):
              total_dur_ms=int((time.time() - t_total) * 1000))
         return FetchResult(out_path, title, n, "cache")
 
+    # 1.5 Дешёвая проверка доступности до лестницы — не жжём квоту на мёртвых видео.
+    status, title0 = _oembed(url)
+    if status == "unavailable":
+        _log(paths.log, ts=now_iso(), video_id=video_id, provider="oembed", outcome="unavailable")
+        _log(paths.log, ts=now_iso(), video_id=video_id, resolved_by=None,
+             total_dur_ms=int((time.time() - t_total) * 1000))
+        raise VideoUnavailable(video_id)
+
     # 2. Лестница
     providers = _load_providers(paths)
     secrets = _load_json(paths.secrets, {})
@@ -427,7 +454,7 @@ def run_fetch(url: str, video_id: str, languages, out_path: Path):
             continue
 
         _set_ban(paths, ptype, "success")
-        title = title or fetch_title(url)
+        title = title or title0 or extract_video_id(url)  # title0 — из oembed-пречека выше
         text, n = format_transcript(url, title, segments)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text, encoding="utf-8")
